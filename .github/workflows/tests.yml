@@ -42,3 +42,5 @@ jobs:
         run: python3 proxyScraper.py -p http
       - name: Run proxyChecker
         run: python3 proxyChecker.py -t 20 -s google.com -l output.txt
+      - name: Run proxyGeolocation
+        run: python3 proxyGeolocation.py -i 8.8.8.8
