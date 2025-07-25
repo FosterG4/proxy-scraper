@@ -17,7 +17,7 @@ import socks
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-#fallback user agents (will be extended from user_agents.txt if available)
+# Fallback user agents (will be extended from user_agents.txt if available)
 user_agents = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
@@ -153,7 +153,7 @@ class Proxy:
                 end_time = time()
                 time_taken = end_time - start_time
                 
-                verbose_print(verbose, f"✓ Proxy {self.proxy} ({self.method.upper()}) is valid, time: {time_taken:.2f}s")
+                verbose_print(verbose, f"[+] Proxy {self.proxy} ({self.method.upper()}) is valid, time: {time_taken:.2f}s")
                 return True, time_taken, None
                 
             finally:
@@ -162,7 +162,7 @@ class Proxy:
                 
         except Exception as e:
             socket.socket = original_socket  # Ensure cleanup even on error
-            verbose_print(verbose, f"✗ Proxy {self.proxy} ({self.method.upper()}) failed: {e}")
+            verbose_print(verbose, f"[-] Proxy {self.proxy} ({self.method.upper()}) failed: {e}")
             return False, 0.0, e
 
     def _check_http_proxy(self, site: str, timeout: int, user_agent: str, verbose: bool, start_time: float) -> Tuple[bool, float, Optional[Exception]]:
@@ -190,11 +190,11 @@ class Proxy:
             end_time = time()
             time_taken = end_time - start_time
             
-            verbose_print(verbose, f"✓ Proxy {self.proxy} ({self.method.upper()}) is valid, time: {time_taken:.2f}s")
+            verbose_print(verbose, f"[+] Proxy {self.proxy} ({self.method.upper()}) is valid, time: {time_taken:.2f}s")
             return True, time_taken, None
             
         except Exception as e:
-            verbose_print(verbose, f"✗ Proxy {self.proxy} ({self.method.upper()}) failed: {e}")
+            verbose_print(verbose, f"[-] Proxy {self.proxy} ({self.method.upper()}) failed: {e}")
             return False, 0.0, e
 
     def __str__(self) -> str:
@@ -406,7 +406,7 @@ def check(file: str, timeout: int, method: str, site: str, verbose: bool, random
     print(f"Average time per proxy: {elapsed_time/len(proxies):.2f}s")
     
     if len(valid_proxies) == 0:
-        print("⚠️  No working proxies found. Consider:")
+        print("WARNING: No working proxies found. Consider:")
         print("   - Increasing timeout value")
         print("   - Trying a different target site")
         print("   - Using fresh proxy list")
@@ -519,13 +519,13 @@ def main() -> None:
     site = _configure_logging_and_validate_args(args)
     
     # Display startup information
-    print("🔍 Proxy Checker v2.0")
-    print(f"📁 Proxy file: {args.list}")
-    print(f"🎯 Target site: {site}")
-    print(f"⏱️  Timeout: {args.timeout}s")
-    print(f"🔧 Method: {args.proxy.upper()}")
-    print(f"🧵 Max threads: {args.max_threads}")
-    print(f"👤 User agents: {len(user_agents)} available")
+    print("*** Proxy Checker v2.0 ***")
+    print(f"Proxy file: {args.list}")
+    print(f"Target site: {site}")
+    print(f"Timeout: {args.timeout}s")
+    print(f"Method: {args.proxy.upper()}")
+    print(f"Max threads: {args.max_threads}")
+    print(f"User agents: {len(user_agents)} available")
     print("=" * 60)
     
     try:
@@ -539,7 +539,7 @@ def main() -> None:
         )
         
     except KeyboardInterrupt:
-        print("\n⚠️  Operation interrupted by user")
+        print("\nWARNING: Operation interrupted by user")
         sys.exit(1)
     except Exception as e:
         logger.error(f"Proxy checking failed: {e}")

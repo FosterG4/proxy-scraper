@@ -505,7 +505,7 @@ def _print_source_statistics(verbose: bool, source_stats: Dict) -> None:
     if not verbose:
         return
         
-    print("\n📊 Source Statistics:")
+    print("\n*** Source Statistics ***")
     print("-" * 50)
     total_bad_filtered = 0
     total_invalid_filtered = 0
