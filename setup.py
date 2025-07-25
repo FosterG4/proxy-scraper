@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='proxyz',
-    version='0.4.0',
+    version='0.3.0',
     py_modules=['proxyScraper', 'proxyChecker'],
     install_requires=[
         'httpx>=0.23.0,<1.0.0',
