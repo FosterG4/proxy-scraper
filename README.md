@@ -3,7 +3,7 @@
 [![Tests](https://github.com/iw4p/proxy-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/iw4p/proxy-scraper/actions/workflows/tests.yml)
 [![Downloads](https://static.pepy.tech/badge/proxyz)](https://pepy.tech/project/proxyz)
 
-**Fast, reliable proxy scraper that collects 30K+ HTTP/HTTPS/SOCKS proxies from 24+ sources in seconds.**
+**Fast, reliable proxy scraper that collects 30K+ HTTP/HTTPS/SOCKS proxies from 5+ sources in seconds.**
 
 ✨ **Features:**
 - ⚡ **Fast scraping** - All sources scraped concurrently  
@@ -56,17 +56,48 @@ python proxyChecker.py --help
 # Get HTTP proxies (basic)
 proxy_scraper -p http
 
-# Get SOCKS5 proxies with detailed output
-proxy_scraper -p socks5 -v
+# Get HTTPS proxies
+proxy_scraper -p https
 
-# Save to custom file
-proxy_scraper -p http -o my_proxies.txt -v
+# Get SOCKS4 proxies
+proxy_scraper -p socks4
+
+# Get SOCKS5 proxies
+proxy_scraper -p socks5
+
+# Get all SOCKS proxies (SOCKS4 + SOCKS5)
+proxy_scraper -p socks
+
+# Save to custom file (example: HTTP)
+proxy_scraper -p http -o output.txt -v
+
+# Save HTTPS proxies with verbose output
+proxy_scraper -p https -v -o output.txt
+
+# Save SOCKS4 proxies
+proxy_scraper -p socks4 -o output.txt
+
+# Save SOCKS5 proxies
+proxy_scraper -p socks5 -o output.txt
 ```
+
 
 ### Step 2: Check Proxy Quality
 ```bash
-# Test scraped proxies (basic)
+# Test scraped HTTP proxies (basic)
 proxy_checker -l output.txt -t 10
+
+# Test HTTP proxies
+proxy_checker -p http -l output.txt -t 10
+
+# Test HTTPS proxies
+proxy_checker -p https -l output.txt -t 10
+
+# Test SOCKS4 proxies
+proxy_checker -p socks4 -l output.txt -t 10
+
+# Test SOCKS5 proxies
+proxy_checker -p socks5 -l output.txt -t 10
 
 # Test against specific site with verbose output
 proxy_checker -l output.txt -s https://google.com -v
@@ -78,12 +109,30 @@ proxy_checker -l output.txt -r -v
 ### Step 3: Complete Workflow Example
 ```bash
 # 1. Scrape HTTP proxies
-proxy_scraper -p http -v -o fresh_proxies.txt
+proxy_scraper -p http -v -o output.txt
 
-# 2. Check their quality
-proxy_checker -l fresh_proxies.txt -t 15 -v
+# 2. Scrape HTTPS proxies
+proxy_scraper -p https -v -o output.txt
 
-# 3. Result: output.txt contains only working proxies
+# 3. Scrape SOCKS4 proxies
+proxy_scraper -p socks4 -v -o output.txt
+
+# 4. Scrape SOCKS5 proxies
+proxy_scraper -p socks5 -v -o output.txt
+
+# 5. Check HTTP proxies
+proxy_checker -l output.txt -t 15 -v
+
+# 6. Check HTTPS proxies
+proxy_checker -l output.txt -t 15 -v
+
+# 7. Check SOCKS4 proxies
+proxy_checker -l output.txt -t 15 -v
+
+# 8. Check SOCKS5 proxies
+proxy_checker -l output.txt -t 15 -v
+
+# 9. Result: output.txt contains only working proxies (for each type)
 ```
 
 ## Supported Proxy Types
@@ -100,14 +149,14 @@ We collect proxies from **24 sources**:
 - spys.me, free-proxy-list.net, proxyscrape.com, geonode.com
 - sslproxies.org, us-proxy.org, socks-proxy.net  
 - proxy-list.download, proxyscan.io, proxyspace.pro
-- freeproxy.lunaproxy.com
+- freeproxy.lunaproxy.com, more
 
 **📦 GitHub Repositories (13 sources)**  
 - proxifly/free-proxy-list, monosans/proxy-list, TheSpeedX/PROXY-List
 - jetkai/proxy-list, roosterkid/openproxylist, mmpx12/proxy-list
 - ShiftyTR/Proxy-List, clarketm/proxy-list, sunny9577/proxy-scraper
 - zloi-user/hideip.me, almroot/proxylist, aslisk/proxyhttps
-- proxy4parsing/proxy-list
+- proxy4parsing/proxy-list, more
 
 ## Advanced Usage
 
@@ -121,6 +170,8 @@ Options:
   -p, --proxy     Proxy type: http, https, socks, socks4, socks5
   -o, --output    Output file (default: output.txt)  
   -v, --verbose   Show detailed statistics
+  -l, --list      Input proxy file (default: output.txt)
+  -h, --help      Show this help message
 ```
 
 **Checking:**
@@ -129,10 +180,13 @@ proxy_checker [-l input.txt] [-t timeout] [-s site] [-v]
 
 Options:
   -l, --list      Input proxy file (default: output.txt)
+  -p, --proxy     Proxy type: http, https, socks, socks4, socks5
+  -o, --output    Output file (default: output.txt)
   -t, --timeout   Timeout in seconds (default: 20)
   -s, --site      Test site (default: https://google.com)
   -r, --random_agent  Use random user agents
   -v, --verbose   Show detailed progress
+  --max-threads  Maximum concurrent threads (default: 10)
 ```
 
 ### From Source Code
@@ -160,15 +214,20 @@ python proxyChecker.py -l output.txt -v
 
 ## Example Output
 ```bash
-Scraping proxies using 24 sources...
-📊 Source Statistics:
+*** Source Statistics ***
 --------------------------------------------------
-ProxyScrapeScraper: 18769 valid, 16408 bad IPs filtered  
-PlainTextScraper: 13516 valid, 5515 bad IPs filtered
-GitHubScraper: 1767 valid, 739 bad IPs filtered
-...
-Total filtered: 22177 bad IPs (CDN/etc), 1 invalid format
-Found 30938 unique valid proxies
+PlainTextScraper: 0 valid, 0 bad IPs, 0 invalid
+GeneralTableScraper: 0 valid, 0 bad IPs, 0 invalid
+ProxyScrapeScraper: 1666 valid, 334 bad IPs, 0 invalid
+GitHubScraper: 0 valid, 0 bad IPs, 0 invalid
+ProxyListApiScraper: 261 valid, 0 bad IPs, 0 invalid
+GeneralDivScraper: 0 valid, 0 bad IPs, 0 invalid
+SpysMeScraper: 400 valid, 0 bad IPs, 0 invalid
+
+Total filtered: 334 bad IPs (CDN/etc), 0 invalid format
+Writing 37030 unique proxies to output.txt...
+Scraping completed in 13.13 seconds
+Found 37030 unique valid proxies
 ```
 
 ## 🌍 Proxy Geolocation & Analysis

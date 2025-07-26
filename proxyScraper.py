@@ -7,6 +7,7 @@ import re
 import sys
 import time
 from typing import Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -14,6 +15,44 @@ from bs4 import BeautifulSoup
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# --- Module-level helpers for source statistics ---
+def _extract_domain(url):
+    """Extract domain from URL for statistics."""
+    try:
+        domain = urlparse(url).netloc or urlparse('//' + url).netloc
+        if not domain:
+            domain = url
+    except Exception:
+        domain = url
+    return domain
+
+def _aggregate_domain_stats(source_stats):
+    """Aggregate statistics by domain."""
+    total_bad_filtered = 0
+    total_invalid_filtered = 0
+    domain_valid = {}
+    skipped = 0
+    for source, stats in source_stats.items():
+        url = source.split(": ", 1)[-1]
+        domain = _extract_domain(url)
+        if stats['valid'] > 0:
+            domain_valid[domain] = domain_valid.get(domain, 0) + stats['valid']
+        else:
+            skipped += 1
+        total_bad_filtered += stats['filtered_bad']
+        total_invalid_filtered += stats['filtered_invalid']
+    return domain_valid, skipped, total_bad_filtered, total_invalid_filtered
+
+def _print_summary(domain_valid, skipped, total_bad_filtered, total_invalid_filtered):
+    """Print formatted statistics summary."""
+    print("\n*** Source Statistics ***")
+    print("-" * 50)
+    for domain, valid_count in sorted(domain_valid.items(), key=lambda x: -x[1]):
+        print(f"{valid_count} valid from {domain}")
+    if skipped:
+        print(f"...{skipped} sources returned 0 valid proxies and are hidden...")
+    print(f"\nTotal filtered: {total_bad_filtered} bad IPs (CDN/etc), {total_invalid_filtered} invalid format")
 
 # Known bad IP ranges to filter out (Cloudflare, major CDNs, etc.)
 BAD_IP_RANGES = [
@@ -100,41 +139,41 @@ class Scraper:
             line = line.strip()
             if not line:
                 continue
-                
+
             stats["total"] += 1
-            
+
             # Basic format validation
             if ':' not in line:
                 stats["filtered_invalid"] += 1
                 continue
-                
+
             try:
                 ip, port = line.split(':', 1)
                 ip = ip.strip()
                 port = port.strip()
-                
+
                 # Validate IP format
                 ipaddress.ip_address(ip)
-                
+
                 # Validate port
                 port_num = int(port)
                 if not (1 <= port_num <= 65535):
                     stats["filtered_invalid"] += 1
                     continue
-                
+
                 # Check if it's a bad IP (CDN, etc.)
                 if is_bad_ip(ip):
                     stats["filtered_bad"] += 1
                     logger.debug(f"Filtered bad IP from {self.source_name}: {ip}:{port}")
                     continue
-                
+
                 proxies.add(f"{ip}:{port}")
                 stats["valid"] += 1
-                
+
             except (ValueError, ipaddress.AddressValueError):
                 stats["filtered_invalid"] += 1
                 continue
-        
+
         return proxies, stats
 
     async def scrape(self, client: httpx.AsyncClient) -> Tuple[List[str], Dict[str, int]]:
@@ -171,48 +210,56 @@ class SpysMeScraper(Scraper):
             raise NotImplementedError(f"Method {self.method} not supported by SpysMeScraper")
         return super().get_url(mode=mode, **kwargs)
 
+    async def handle(self, response: httpx.Response) -> str:
+        """Parse spys.me format to extract only IP:port."""
+        try:
+            lines = response.text.strip().split('\n')
+            proxies: Set[str] = set()
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Skip header lines and comments
+                if (line.startswith('Proxy list') or
+                        line.startswith('Socks proxy=') or
+                        line.startswith('Support by') or
+                        line.startswith('BTC ') or
+                        line.startswith('IP address:Port') or
+                        line.startswith('#')):
+                    continue
+                
+                # Extract IP:port from lines like "89.58.55.193:80 DE-A + "
+                # The format is: IP:PORT COUNTRY-ANONYMITY-SSL GOOGLE_PASSED
+                parts = line.split()
+                if parts and ':' in parts[0]:
+                    proxy = parts[0].strip()
+                    # Validate IP:port format
+                    if re.match(r"\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}", proxy):
+                        proxies.add(proxy)
+            
+            return "\n".join(proxies)
+        except Exception as e:
+            logger.debug(f"Error parsing spys.me format: {e}")
+            return ""
+
 
 # From proxyscrape.com
 class ProxyScrapeScraper(Scraper):
-    """Scraper for proxyscrape.com API."""
+    """Scraper for proxyscrape.com v4 API."""
 
-    def __init__(self, method: str, timeout: int = 1000, country: str = "All"):
-        self.api_timeout = timeout  # Renamed to avoid confusion with HTTP timeout
+    def __init__(self, method: str, country: str = "all"):
         self.country = country
         super().__init__(method,
-                         "https://api.proxyscrape.com/?request=getproxies"
-                         "&proxytype={method}"
-                         "&timeout={api_timeout}"
-                         "&country={country}", 
-                         timeout=20)  # HTTP timeout
+                         "https://api.proxyscrape.com/v4/free-proxy-list/get?"
+                         "request=display_proxies&proxy_format=ipport&format=text"
+                         "&protocol={method}&country={country}", 
+                         timeout=20)
 
     def get_url(self, **kwargs) -> str:
         """Get URL with API parameters."""
-        return super().get_url(api_timeout=self.api_timeout, country=self.country, **kwargs)
-
-# From geonode.com - A little dirty, grab http(s) and socks but use just for socks
-class GeoNodeScraper(Scraper):
-    """Scraper for geonode.com proxy API."""
-
-    def __init__(self, method: str, limit: str = "500", page: str = "1", 
-                 sort_by: str = "lastChecked", sort_type: str = "desc"):
-        self.limit = limit
-        self.page = page
-        self.sort_by = sort_by
-        self.sort_type = sort_type
-        super().__init__(method,
-                         "https://proxylist.geonode.com/api/proxy-list?"
-                         "&limit={limit}"
-                         "&page={page}"
-                         "&sort_by={sort_by}"
-                         "&sort_type={sort_type}",
-                         timeout=15)
-
-    def get_url(self, **kwargs) -> str:
-        """Get URL with API parameters."""
-        return super().get_url(limit=self.limit, page=self.page, 
-                               sort_by=self.sort_by, sort_type=self.sort_type, **kwargs)
-
+        return super().get_url(country=self.country, **kwargs)
 
 # From proxy-list.download
 class ProxyListDownloadScraper(Scraper):
@@ -321,29 +368,27 @@ class ProxyListApiScraper(Scraper):
     """Scraper for APIs that return JSON proxy lists."""
     
     def _extract_proxy_from_item(self, item: dict) -> Optional[str]:
-        """Extract proxy string from a single item."""
+        """Extract proxy string from a single item for new www.proxy-list.download format."""
         if not isinstance(item, dict):
             return None
-            
-        ip = item.get('ip')
-        port = item.get('port')
+        # Support both old and new keys
+        ip = item.get('ip') or item.get('IP')
+        port = item.get('port') or item.get('PORT')
         if ip and port:
             return f"{ip}:{port}"
         return None
-    
-    def _process_list_data(self, data: list) -> Set[str]:
-        """Process list-type JSON data."""
-        proxies = set()
-        for item in data:
-            proxy = self._extract_proxy_from_item(item)
-            if proxy:
-                proxies.add(proxy)
-        return proxies
-    
+
     def _process_dict_data(self, data: dict) -> Set[str]:
-        """Process dict-type JSON data."""
+        """Process dict-type JSON data for new www.proxy-list.download format."""
         proxies = set()
-        if 'data' in data and isinstance(data['data'], list):
+        # New format: proxies are in 'LISTA' key
+        if 'LISTA' in data and isinstance(data['LISTA'], list):
+            for item in data['LISTA']:
+                proxy = self._extract_proxy_from_item(item)
+                if proxy:
+                    proxies.add(proxy)
+        # Fallback for old format
+        elif 'data' in data and isinstance(data['data'], list):
             for item in data['data']:
                 proxy = self._extract_proxy_from_item(item)
                 if proxy:
@@ -351,21 +396,40 @@ class ProxyListApiScraper(Scraper):
         return proxies
 
     async def handle(self, response: httpx.Response) -> str:
-        """Parse JSON API response for proxies."""
+        """Parse JSON API response for proxies (new and old format)."""
         try:
             data = response.json()
             proxies: Set[str] = set()
-            
-            # Handle different JSON structures
-            if isinstance(data, list):
-                proxies = self._process_list_data(data)
-            elif isinstance(data, dict):
+            if isinstance(data, dict):
                 proxies = self._process_dict_data(data)
-                            
             return "\n".join(proxies)
         except Exception as e:
             logger.debug(f"Error parsing JSON API response: {e}")
             return ""
+
+# Helper functions for PlainTextScraper
+def _is_protocol_match(protocol: str, method: str) -> bool:
+    """Check if protocol matches the scraper method."""
+    return (protocol.lower() == method.lower() or 
+            (method == "socks" and protocol.lower() in ["socks4", "socks5"]))
+
+def _is_valid_proxy_format(address: str) -> bool:
+    """Validate IP:port format."""
+    return bool(re.match(r"\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}", address))
+
+def _process_protocol_line(line: str, method: str) -> Optional[str]:
+    """Process a line with protocol://ip:port format."""
+    protocol, address = line.split("://", 1)
+    if _is_protocol_match(protocol, method):
+        if _is_valid_proxy_format(address):
+            return address
+    return None
+
+def _process_plain_line(line: str) -> Optional[str]:
+    """Process a plain IP:port line."""
+    if _is_valid_proxy_format(line):
+        return line
+    return None
 
 # For scraping from plain text sources
 class PlainTextScraper(Scraper):
@@ -381,91 +445,129 @@ class PlainTextScraper(Scraper):
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                    
-                # Look for IP:port pattern
-                if re.match(r"\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}", line):
-                    proxies.add(line)
-                    
+                
+                # Handle protocol://ip:port format (ProxyScrape v4 API)
+                if "://" in line:
+                    proxy = _process_protocol_line(line, self.method)
+                    if proxy:
+                        proxies.add(proxy)
+                else:
+                    # Look for plain IP:port pattern (legacy format)
+                    proxy = _process_plain_line(line)
+                    if proxy:
+                        proxies.add(proxy)
+                        
             return "\n".join(proxies)
         except Exception as e:
             logger.debug(f"Error parsing plain text proxy list: {e}")
             return ""
 
 
-# Improved scrapers list with better organization
+# Latest and most frequently updated proxy sources (2025)
 scrapers = [
-    # Direct API scrapers
+    # Primary API scrapers (most reliable)
     SpysMeScraper("http"),
     SpysMeScraper("socks"),
     ProxyScrapeScraper("http"),
     ProxyScrapeScraper("socks4"),
     ProxyScrapeScraper("socks5"),
-    GeoNodeScraper("socks"),
     
-    # Download API scrapers
-    ProxyListDownloadScraper("https", "elite"),
-    ProxyListDownloadScraper("http", "elite"),
-    ProxyListDownloadScraper("http", "transparent"),
-    ProxyListDownloadScraper("http", "anonymous"),
+    # TheSpeedX/PROXY-List (updated daily)
+    GitHubScraper("http", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
+    GitHubScraper("socks4", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt"),
+    GitHubScraper("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
+
+    # jetkai/proxy-list (hourly updates, geolocation)
+    GitHubScraper("http", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt"),
+    GitHubScraper("https", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt"),
+    GitHubScraper("socks4", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks4.txt"),
+    GitHubScraper("socks5", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt"),
+
+    # prxchk/proxy-list (10 min updates, deduplicated)
+    GitHubScraper("http", "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt"),
+    GitHubScraper("socks4", "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks4.txt"),
+    GitHubScraper("socks5", "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt"),
+
+    # roosterkid/openproxylist (hourly updates)
+    GitHubScraper("http", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt"),
+    GitHubScraper("socks4", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt"),
+    GitHubScraper("socks5", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt"),
+
+    # mmpx12/proxy-list (hourly updates)
+    GitHubScraper("http", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt"),
+    GitHubScraper("https", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt"),
+    GitHubScraper("socks4", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt"),
+    GitHubScraper("socks5", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt"),
+
+
+
+    # ProxyScrape API v4 (live, no key needed)
+    PlainTextScraper("http", "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=protocolipport&format=text&timeout=20000"),
+    PlainTextScraper("socks4", "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks4&proxy_format=protocolipport&format=text&timeout=20000"),
+    PlainTextScraper("socks5", "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=socks5&proxy_format=protocolipport&format=text&timeout=20000"),
+
+    # OpenProxyList API (10 min updates)
+    PlainTextScraper("http", "https://api.openproxylist.xyz/http.txt"),
+    PlainTextScraper("https", "https://api.openproxylist.xyz/https.txt"),
+    PlainTextScraper("socks4", "https://api.openproxylist.xyz/socks4.txt"),
+    PlainTextScraper("socks5", "https://api.openproxylist.xyz/socks5.txt"),
+    PlainTextScraper("http", "https://www.proxyscan.io/download?type=http"),
+    PlainTextScraper("socks4", "https://www.proxyscan.io/download?type=socks4"),
+    PlainTextScraper("socks5", "https://raw.githubusercontent.com/Surfboardv2ray/Proxy-sorter/main/socks5.txt"),
     
-    # HTML table scrapers
+    # JSON APIs
+    ProxyListApiScraper("http", "https://www.proxy-list.download/api/v2/get?l=en&t=http"),
+    ProxyListApiScraper("https", "https://www.proxy-list.download/api/v2/get?l=en&t=https"),
+    ProxyListApiScraper("socks4", "https://www.proxy-list.download/api/v2/get?l=en&t=socks4"),
+    ProxyListApiScraper("socks5", "https://www.proxy-list.download/api/v2/get?l=en&t=socks5"),
+    
+    # Fresh community sources (updated daily)
+    GitHubScraper("http", "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt"),
+    GitHubScraper("socks4", "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks4.txt"),
+    GitHubScraper("socks5", "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt"),
+    
+    # Ultra-fresh sources (updated every few hours)
+    PlainTextScraper("http", "https://api.openproxylist.xyz/http.txt"),
+    PlainTextScraper("socks4", "https://api.openproxylist.xyz/socks4.txt"),
+    PlainTextScraper("socks5", "https://api.openproxylist.xyz/socks5.txt"),
+    
+    # Elite proxy APIs
+
+    
+    # New 2025 sources
+    GitHubScraper("http", "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt"),
+    GitHubScraper("https", "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/https.txt"),
+    GitHubScraper("socks4", "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks4.txt"),
+    GitHubScraper("socks5", "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks5.txt"),
+    
+    # Quality HTML scrapers (still active)
     GeneralTableScraper("https", "http://sslproxies.org"),
     GeneralTableScraper("http", "http://free-proxy-list.net"),
     GeneralTableScraper("http", "http://us-proxy.org"),
     GeneralTableScraper("socks", "http://socks-proxy.net"),
     
-    # HTML div scrapers
+
+    GeneralTableScraper("http", "https://premproxy.com/proxy-by-country/"),
+    GeneralTableScraper("https", "https://premproxy.com/socks-list/"),
+    GeneralTableScraper("http", "https://proxyservers.pro/proxy/list/protocol/http"),
+    GeneralTableScraper("https", "https://proxyservers.pro/proxy/list/protocol/https"),
+    
+    # Updated HTML div scrapers
     GeneralDivScraper("http", "https://freeproxy.lunaproxy.com/"),
+    GeneralDivScraper("http", "https://www.freeproxylists.net/"),
+    GeneralDivScraper("socks4", "https://www.freeproxylists.net/socks4.html"),
+    GeneralDivScraper("socks5", "https://www.freeproxylists.net/socks5.html"),
     
-    # GitHub raw list scrapers (established sources)
-    GitHubScraper("http", "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt"),
-    GitHubScraper("socks4", "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt"),
-    GitHubScraper("socks5", "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt"),
-    GitHubScraper("http", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt"),
-    GitHubScraper("socks", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/all.txt"),
-    GitHubScraper("https", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt"),
-    GitHubScraper("http", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt"),
-    GitHubScraper("socks4", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt"),
-    GitHubScraper("socks5", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt"),
-    
-    # Additional GitHub sources
-    GitHubScraper("http", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
-    GitHubScraper("socks4", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt"),
-    GitHubScraper("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
-    GitHubScraper("http", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt"),
-    GitHubScraper("https", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt"),
-    GitHubScraper("socks4", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt"),
-    GitHubScraper("socks5", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt"),
-    GitHubScraper("http", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt"),
-    GitHubScraper("https", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt"),
-    GitHubScraper("socks4", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks4.txt"),
-    GitHubScraper("socks5", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt"),
-    GitHubScraper("http", "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt"),
-    GitHubScraper("http", "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt"),
-    GitHubScraper("http", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt"),
-    GitHubScraper("socks4", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt"),
-    GitHubScraper("socks5", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt"),
-    GitHubScraper("http", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt"),
-    GitHubScraper("https", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt"),
-    GitHubScraper("socks4", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt"),
-    GitHubScraper("socks5", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt"),
-    
-    # Plain text sources
-    PlainTextScraper("http", "https://www.proxyscan.io/download?type=http"),
-    PlainTextScraper("socks4", "https://www.proxyscan.io/download?type=socks4"),
-    PlainTextScraper("socks5", "https://www.proxyscan.io/download?type=socks5"),
-    PlainTextScraper("http", "https://raw.githubusercontent.com/almroot/proxylist/master/list.txt"),
-    PlainTextScraper("http", "https://raw.githubusercontent.com/aslisk/proxyhttps/main/https.txt"),
-    PlainTextScraper("http", "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt"),
-    
-    # Additional table scrapers
-    GeneralTableScraper("http", "https://proxyspace.pro/http.txt"),
-    GeneralTableScraper("socks4", "https://proxyspace.pro/socks4.txt"),
-    GeneralTableScraper("socks5", "https://proxyspace.pro/socks5.txt"),
-    
-    # API-based scrapers
-    ProxyListApiScraper("http", "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http"),
-    ProxyListApiScraper("socks5", "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=socks5"),
+    # Modern proxy sites with table format
+    GeneralTableScraper("http", "https://hidemy.name/en/proxy-list/?type=h"),
+    GeneralTableScraper("https", "https://hidemy.name/en/proxy-list/?type=s"),
+    GeneralTableScraper("socks4", "https://hidemy.name/en/proxy-list/?type=4"),
+    GeneralTableScraper("socks5", "https://hidemy.name/en/proxy-list/?type=5"),
+
+    # Additional HTML sources
+    GeneralTableScraper("http", "https://www.proxynova.com/proxy-server-list/"),
+    GeneralTableScraper("http", "https://www.proxydocker.com/en/proxylist/"),
+    GeneralTableScraper("https", "https://www.proxydocker.com/en/proxylist/type/https"),
 ]
 
 
@@ -504,16 +606,8 @@ def _print_source_statistics(verbose: bool, source_stats: Dict) -> None:
     """Print source statistics if verbose mode is enabled."""
     if not verbose:
         return
-        
-    print("\n*** Source Statistics ***")
-    print("-" * 50)
-    total_bad_filtered = 0
-    total_invalid_filtered = 0
-    for source, stats in source_stats.items():
-        print(f"{source}: {stats['valid']} valid, {stats['filtered_bad']} bad IPs, {stats['filtered_invalid']} invalid")
-        total_bad_filtered += stats['filtered_bad']
-        total_invalid_filtered += stats['filtered_invalid']
-    print(f"\nTotal filtered: {total_bad_filtered} bad IPs (CDN/etc), {total_invalid_filtered} invalid format")
+    domain_valid, skipped, total_bad_filtered, total_invalid_filtered = _aggregate_domain_stats(source_stats)
+    _print_summary(domain_valid, skipped, total_bad_filtered, total_invalid_filtered)
 
 async def scrape(method: str, output: str, verbose: bool) -> None:
     """
@@ -538,14 +632,16 @@ async def scrape(method: str, output: str, verbose: bool) -> None:
     async def scrape_source(scraper, client) -> None:
         """Scrape from a single source."""
         try:
+            source_id = f"{scraper.source_name}: {scraper.get_url()}"
             verbose_print(verbose, f"Scraping from {scraper.get_url()}...")
             proxies, stats = await scraper.scrape(client)
             all_proxies.extend(proxies)
-            source_stats[scraper.source_name] = stats
-            verbose_print(verbose, f"Found {len(proxies)} valid proxies from {scraper.source_name} ({stats['filtered_bad']} bad IPs filtered, {stats['filtered_invalid']} invalid filtered)")
+            source_stats[source_id] = stats
+            verbose_print(verbose, f"Found {len(proxies)} valid proxies from {source_id} ({stats['filtered_bad']} bad IPs filtered, {stats['filtered_invalid']} invalid filtered)")
         except Exception as e:
-            logger.debug(f"Failed to scrape from {scraper.source_name}: {e}")
-            source_stats[scraper.source_name] = {"total": 0, "filtered_bad": 0, "filtered_invalid": 0, "valid": 0}
+            source_id = f"{scraper.source_name}: {scraper.get_url()}"
+            logger.debug(f"Failed to scrape from {source_id}: {e}")
+            source_stats[source_id] = {"total": 0, "filtered_bad": 0, "filtered_invalid": 0, "valid": 0}
 
     # Execute all scrapers concurrently
     async with httpx.AsyncClient(**client_config) as client:
@@ -578,7 +674,10 @@ def _setup_argument_parser():
 Examples:
   %(prog)s -p http -v                    # Scrape HTTP proxies with verbose output
   %(prog)s -p socks -o socks.txt         # Scrape SOCKS proxies to custom file
-  %(prog)s -p https --verbose            # Scrape HTTPS proxies with verbose output
+  %(prog)s -p https --verbose           # Scrape HTTPS proxies with verbose output
+  %(prog)s -p socks4 --debug             # Scrape SOCKS4 proxies with debug logging
+  %(prog)s -p socks5 -o output.txt -v     # Scrape SOCKS5 proxies to output.txt with verbose logging
+  %(prog)s -p http -o proxies.txt --debug  # Scrape HTTP proxies to proxies.txt with debug logging
         """,
     )
     

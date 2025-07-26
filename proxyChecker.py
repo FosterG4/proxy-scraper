@@ -238,13 +238,14 @@ def _read_proxy_file(file_path: str) -> List[str]:
         sys.exit(1)
 
 
-def load_proxies_from_file(file_path: str, method: str) -> List[Proxy]:
+def load_proxies_from_file(file_path: str, method: str, limit: Optional[int] = None) -> List[Proxy]:
     """
     Load proxies from file and create Proxy objects.
     
     Args:
         file_path: Path to proxy list file
         method: Proxy method to use
+        limit: Maximum number of proxies to load (None for all)
         
     Returns:
         List of valid Proxy objects
@@ -255,19 +256,22 @@ def load_proxies_from_file(file_path: str, method: str) -> List[Proxy]:
     lines = _read_proxy_file(file_path)
     
     for line_num, line in enumerate(lines, 1):
+        # Check if we've reached the limit
+        if limit is not None and len(proxies) >= limit:
+            logger.info(f"Reached limit of {limit} proxies, stopping load")
+            break
+            
         proxy = _process_proxy_line(line, line_num, method)
         if proxy is not None:
             proxies.append(proxy)
         else:
             if line.strip() and not line.strip().startswith('#'):
                 invalid_count += 1
-    
+
     if invalid_count > 0:
         logger.warning(f"Skipped {invalid_count} invalid proxy entries")
         
     return proxies
-
-
 def save_valid_proxies(file_path: str, valid_proxies: List[Proxy]) -> None:
     """
     Save valid proxies back to file.
@@ -291,10 +295,10 @@ def save_valid_proxies(file_path: str, valid_proxies: List[Proxy]) -> None:
         raise
 
 
-def _prepare_checking_environment(file: str, method: str, site: str, timeout: int, random_user_agent: bool) -> Tuple[List[Proxy], str, int]:
+def _prepare_checking_environment(file: str, method: str, site: str, timeout: int, random_user_agent: bool, limit: Optional[int] = None) -> Tuple[List[Proxy], str, int]:
     """Prepare the environment for proxy checking."""
     print(f"Loading proxies from {file}...")
-    proxies = load_proxies_from_file(file, method)
+    proxies = load_proxies_from_file(file, method, limit)
     print(f"Loaded {len(proxies)} valid proxies for checking")
     
     if not proxies:
@@ -346,7 +350,7 @@ def _create_proxy_checker(valid_proxies: List[Proxy], checked_count_ref: List[in
     return check_single_proxy
 
 
-def check(file: str, timeout: int, method: str, site: str, verbose: bool, random_user_agent: bool) -> None:
+def check(file: str, timeout: int, method: str, site: str, verbose: bool, random_user_agent: bool, limit: Optional[int] = None) -> None:
     """
     Main proxy checking function.
     
@@ -357,12 +361,13 @@ def check(file: str, timeout: int, method: str, site: str, verbose: bool, random
         site: Target website for testing
         verbose: Enable verbose output
         random_user_agent: Use random user agent per proxy
+        limit: Maximum number of proxies to check
     """
     start_time = time()
     
     # Prepare checking environment
     proxies, base_user_agent, max_threads = _prepare_checking_environment(
-        file, method, site, timeout, random_user_agent,
+        file, method, site, timeout, random_user_agent, limit,
     )
     
     if not proxies:
@@ -379,24 +384,12 @@ def check(file: str, timeout: int, method: str, site: str, verbose: bool, random
         random_user_agent, base_user_agent, len(proxies), verbose,
     )
     
-    # Execute checking with thread pool
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
-        futures = [executor.submit(check_single_proxy, proxy) for proxy in proxies]
-        
-        try:
-            concurrent.futures.wait(futures, timeout=None)
-        except KeyboardInterrupt:
-            print("\nChecking interrupted by user")
-            executor.shutdown(wait=False)
-            return
-    
-    # Save results
-    save_valid_proxies(file, valid_proxies)
-    
-    # Final statistics
+    _run_proxy_check_threadpool(
+        check_single_proxy, proxies, valid_proxies, checked_count_ref, file, start_time,
+    )
     elapsed_time = time() - start_time
+    # Final statistics
     success_rate = (len(valid_proxies) / len(proxies)) * 100 if proxies else 0
-    
     print("-" * 60)
     print("Proxy checking completed!")
     print(f"Total checked: {len(proxies)}")
@@ -404,12 +397,37 @@ def check(file: str, timeout: int, method: str, site: str, verbose: bool, random
     print(f"Success rate: {success_rate:.1f}%")
     print(f"Time taken: {elapsed_time:.2f} seconds")
     print(f"Average time per proxy: {elapsed_time/len(proxies):.2f}s")
-    
     if len(valid_proxies) == 0:
         print("WARNING: No working proxies found. Consider:")
         print("   - Increasing timeout value")
         print("   - Trying a different target site")
         print("   - Using fresh proxy list")
+
+
+def _run_proxy_check_threadpool(check_single_proxy, proxies, valid_proxies, checked_count_ref, file, start_time):
+    """Helper to run proxy checking in a thread pool, handles KeyboardInterrupt and saving."""
+    executor = None
+    try:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(proxies), 100))
+        futures = [executor.submit(check_single_proxy, proxy) for proxy in proxies]
+        for _ in concurrent.futures.as_completed(futures):
+            pass
+    except KeyboardInterrupt:
+        print("\n[!] Proxy checking cancelled by user. Stopping threads and saving progress...")
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        save_valid_proxies(file, valid_proxies)
+        elapsed_time = time() - start_time
+        print("-" * 60)
+        print(f"Check cancelled. {len(valid_proxies)} valid proxies saved to {file}.")
+        print(f"Checked: {checked_count_ref[0]} / {len(proxies)} | Time: {elapsed_time:.2f}s")
+        sys.exit(130)
+    if executor is not None:
+        executor.shutdown(wait=True)
+    save_valid_proxies(file, valid_proxies)
 
 
 def _setup_argument_parser() -> argparse.ArgumentParser:
@@ -422,11 +440,15 @@ Examples:
   %(prog)s -p http -t 10 -v                    # Check HTTP proxies with 10s timeout
   %(prog)s -p socks4 -l socks.txt -r           # Check SOCKS4 with random user agents
   %(prog)s -p https -s httpbin.org/ip --debug  # Check HTTPS proxies against custom site
-
+  %(prog)s -p http --limit 50 -v               # Check only the first 50 HTTP proxies
+  %(prog)s -p socks5 -l proxies.txt -t 30 --max-threads 20 # Check SOCKS5 proxies with 30s timeout and 20 threads
 Notes:
   - Dead proxies are automatically removed from the list file
   - Use --debug for detailed error information
   - Higher timeout values may find more working proxies but take longer
+  - Use --limit for quick testing or when you don't want to check all proxies
+  - Random user agents can help avoid detection by target sites
+  - Use --max-threads to control concurrency, default is 10
         """,
     )
     
@@ -470,8 +492,13 @@ Notes:
     parser.add_argument(
         "--max-threads",
         type=int,
-        default=100,
+        default=10,
         help="Maximum number of concurrent threads (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of proxies to check (default: check all)",
     )
     
     return parser
@@ -525,6 +552,8 @@ def main() -> None:
     print(f"Timeout: {args.timeout}s")
     print(f"Method: {args.proxy.upper()}")
     print(f"Max threads: {args.max_threads}")
+    if args.limit:
+        print(f"Limit: {args.limit} proxies")
     print(f"User agents: {len(user_agents)} available")
     print("=" * 60)
     
@@ -536,6 +565,7 @@ def main() -> None:
             site=site,
             verbose=args.verbose,
             random_user_agent=args.random_agent,
+            limit=args.limit,
         )
         
     except KeyboardInterrupt:
